@@ -266,3 +266,173 @@ pub async fn stream_to_stdout<M: CompletionModel>(
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::stream;
+    use serde_json::json;
+
+    // Mock response type for testing
+    #[derive(Clone, Debug)]
+    struct MockResponse {
+        id: String,
+    }
+
+    fn create_mock_stream(
+        chunks: Vec<RawStreamingChoice<MockResponse>>,
+    ) -> StreamingResult<MockResponse> {
+        let stream = stream::iter(chunks.into_iter().map(|chunk| Ok(chunk)));
+        Box::pin(stream)
+    }
+
+    #[tokio::test]
+    async fn test_reasoning_chunks_not_forwarded() {
+        let chunks = vec![
+            RawStreamingChoice::Reasoning("Let me think...".to_string()),
+            RawStreamingChoice::Reasoning(" step by step".to_string()),
+            RawStreamingChoice::Message("The answer is".to_string()),
+            RawStreamingChoice::Message(" 42".to_string()),
+        ];
+
+        let inner = create_mock_stream(chunks);
+        let mut stream = StreamingCompletionResponse::stream(inner);
+
+        let mut collected_messages = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            match chunk {
+                Ok(AssistantContent::Text(text)) => {
+                    collected_messages.push(text.text);
+                }
+                Ok(_) => {} // Ignore other types for this test
+                Err(e) => panic!("Unexpected error: {}", e),
+            }
+        }
+
+        // Only messages should be forwarded, not reasoning chunks
+        assert_eq!(collected_messages, vec!["The answer is", " 42"]);
+        
+        // Final choice should only contain the message text
+        match stream.choice.into_iter().next().unwrap() {
+            AssistantContent::Text(text) => {
+                assert_eq!(text.text, "The answer is 42");
+            },
+            _ => panic!("Expected text content"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_reasoning_chunks_collected_internally() {
+        let chunks = vec![
+            RawStreamingChoice::Reasoning("First, I analyze".to_string()),
+            RawStreamingChoice::Reasoning(" the problem...".to_string()),
+            RawStreamingChoice::Message("Solution: X".to_string()),
+        ];
+
+        let inner = create_mock_stream(chunks);
+        let mut stream = StreamingCompletionResponse::stream(inner);
+
+        // Consume all chunks
+        while let Some(_) = stream.next().await {}
+
+        // Check that reasoning was collected internally
+        assert_eq!(stream.reasoning, "First, I analyze the problem...");
+        assert_eq!(stream.text, "Solution: X");
+    }
+
+    #[tokio::test]
+    async fn test_mixed_content_with_tools_and_reasoning() {
+        let chunks = vec![
+            RawStreamingChoice::Reasoning("I need to calculate this...".to_string()),
+            RawStreamingChoice::ToolCall {
+                id: "call_123".to_string(),
+                name: "calculator".to_string(),
+                arguments: json!({"expression": "2+2"}),
+            },
+            RawStreamingChoice::Message("The result is 4".to_string()),
+        ];
+
+        let inner = create_mock_stream(chunks);
+        let mut stream = StreamingCompletionResponse::stream(inner);
+
+        let mut collected = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            match chunk {
+                Ok(content) => collected.push(content),
+                Err(e) => panic!("Unexpected error: {}", e),
+            }
+        }
+
+        // Should have tool call and message, but not reasoning
+        assert_eq!(collected.len(), 2);
+        
+        // Verify the final choice contains both tool call and text
+        let final_choice: Vec<_> = stream.choice.into_iter().collect();
+        assert_eq!(final_choice.len(), 2);
+        
+        // First should be text content (inserted at index 0)
+        match &final_choice[0] {
+            AssistantContent::Text(text) => {
+                assert_eq!(text.text, "The result is 4");
+            },
+            _ => panic!("Expected text content first"),
+        }
+
+        // Second should be tool call
+        match &final_choice[1] {
+            AssistantContent::ToolCall(tool_call) => {
+                assert_eq!(tool_call.id, "call_123");
+                assert_eq!(tool_call.function.name, "calculator");
+            },
+            _ => panic!("Expected tool call content"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_final_response_handling() {
+        let mock_response = MockResponse {
+            id: "test_123".to_string(),
+        };
+
+        let chunks = vec![
+            RawStreamingChoice::Message("Hello".to_string()),
+            RawStreamingChoice::FinalResponse(mock_response.clone()),
+            RawStreamingChoice::Message(" World".to_string()),
+        ];
+
+        let inner = create_mock_stream(chunks);
+        let mut stream = StreamingCompletionResponse::stream(inner);
+
+        let mut message_count = 0;
+        while let Some(chunk) = stream.next().await {
+            if let Ok(AssistantContent::Text(_)) = chunk {
+                message_count += 1;
+            }
+        }
+
+        assert_eq!(message_count, 2);
+        assert!(stream.response.is_some());
+        assert_eq!(stream.response.unwrap().id, "test_123");
+    }
+
+    #[test]
+    fn test_raw_streaming_choice_debug() {
+        let reasoning = RawStreamingChoice::<()>::Reasoning("thinking...".to_string());
+        let debug_str = format!("{:?}", reasoning);
+        assert!(debug_str.contains("Reasoning"));
+        assert!(debug_str.contains("thinking..."));
+    }
+
+    #[test]
+    fn test_raw_streaming_choice_clone() {
+        let original = RawStreamingChoice::<()>::Reasoning("original thought".to_string());
+        let cloned = original.clone();
+        
+        match (original, cloned) {
+            (RawStreamingChoice::Reasoning(orig), RawStreamingChoice::Reasoning(clone)) => {
+                assert_eq!(orig, clone);
+            },
+            _ => panic!("Clone should preserve variant"),
+        }
+    }
+}

@@ -670,4 +670,176 @@ mod tests {
 
         assert_eq!(choice, expected_choice);
     }
+
+    #[test]
+    fn test_deserialize_reasoning_content_response() {
+        let data = r#"
+        {
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": "The answer is 42.",
+                        "reasoning_content": "Let me think step by step:\n1. The question asks about the meaning of life\n2. According to Douglas Adams' book, the answer is 42\n3. Therefore, the answer is 42."
+                    },
+                    "logprobs": null,
+                    "finish_reason": "stop"
+                }
+            ]
+        }
+        "#;
+
+        let jd = &mut serde_json::Deserializer::from_str(data);
+        let result: Result<CompletionResponse, _> = serde_path_to_error::deserialize(jd);
+
+        match result {
+            Ok(response) => {
+                let choice = response.choices.first().unwrap();
+                match &choice.message {
+                    Message::Assistant { content, reasoning_content, .. } => {
+                        assert_eq!(content, "The answer is 42.");
+                        assert_eq!(
+                            reasoning_content.as_ref().unwrap(),
+                            "Let me think step by step:\n1. The question asks about the meaning of life\n2. According to Douglas Adams' book, the answer is 42\n3. Therefore, the answer is 42."
+                        );
+                    },
+                    _ => panic!("Expected assistant message with reasoning"),
+                }
+            },
+            Err(err) => {
+                panic!("Deserialization error at {}: {}", err.path(), err);
+            }
+        }
+    }
+
+    #[test]
+    fn test_serialize_reasoning_content_message() {
+        let message = Message::Assistant {
+            content: "The final answer is 2+2=4".to_string(),
+            reasoning_content: Some("First, I need to understand what 2+2 means. It's addition of two numbers: 2 and 2. Adding them together: 2+2=4".to_string()),
+            name: None,
+            tool_calls: vec![],
+        };
+
+        let serialized = serde_json::to_string(&message).unwrap();
+        
+        // Should contain both content and reasoning_content
+        assert!(serialized.contains("\"content\":\"The final answer is 2+2=4\""));
+        assert!(serialized.contains("\"reasoning_content\":\"First, I need to understand"));
+        assert!(serialized.contains("\"role\":\"assistant\""));
+
+        // Deserialize back to verify round-trip
+        let deserialized: Message = serde_json::from_str(&serialized).unwrap();
+        match deserialized {
+            Message::Assistant { content, reasoning_content, .. } => {
+                assert_eq!(content, "The final answer is 2+2=4");
+                assert!(reasoning_content.is_some());
+                assert!(reasoning_content.unwrap().contains("First, I need to understand"));
+            },
+            _ => panic!("Expected assistant message"),
+        }
+    }
+
+    #[test]
+    fn test_serialize_no_reasoning_content() {
+        let message = Message::Assistant {
+            content: "Simple answer".to_string(),
+            reasoning_content: None,
+            name: None,
+            tool_calls: vec![],
+        };
+
+        let serialized = serde_json::to_string(&message).unwrap();
+        
+        // Should contain content but NOT reasoning_content (due to skip_serializing_if)
+        assert!(serialized.contains("\"content\":\"Simple answer\""));
+        assert!(!serialized.contains("reasoning_content"));
+        assert!(serialized.contains("\"role\":\"assistant\""));
+    }
+
+    #[test]
+    fn test_deserialize_deepseek_reasoner_response() {
+        // This simulates a realistic response from deepseek-reasoner model
+        let data = r#"
+        {
+            "id": "chatcmpl-123",
+            "object": "chat.completion",
+            "created": 1677652288,
+            "model": "deepseek-reasoner",
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": "Based on my analysis, the best approach would be to use dynamic programming to solve this efficiently.",
+                        "reasoning_content": "<think>\nThe user is asking about algorithm optimization. Let me think through this:\n\n1. The problem seems to be asking for the most efficient way to solve a computational problem\n2. There are several approaches: brute force, divide and conquer, dynamic programming, greedy algorithms\n3. For problems with overlapping subproblems and optimal substructure, dynamic programming is often the best choice\n4. Dynamic programming can reduce time complexity from exponential to polynomial in many cases\n5. Let me recommend this approach\n</think>",
+                        "tool_calls": []
+                    },
+                    "logprobs": null,
+                    "finish_reason": "stop"
+                }
+            ],
+            "usage": {
+                "prompt_tokens": 15,
+                "completion_tokens": 45,
+                "total_tokens": 60
+            }
+        }
+        "#;
+
+        let jd = &mut serde_json::Deserializer::from_str(data);
+        let result: Result<CompletionResponse, _> = serde_path_to_error::deserialize(jd);
+
+        match result {
+            Ok(response) => {
+                let choice = response.choices.first().unwrap();
+                assert_eq!(choice.finish_reason, "stop");
+                match &choice.message {
+                    Message::Assistant { content, reasoning_content, tool_calls, .. } => {
+                        assert_eq!(content, "Based on my analysis, the best approach would be to use dynamic programming to solve this efficiently.");
+                        assert!(reasoning_content.is_some());
+                        let reasoning = reasoning_content.as_ref().unwrap();
+                        assert!(reasoning.contains("<think>"));
+                        assert!(reasoning.contains("dynamic programming"));
+                        assert!(reasoning.contains("</think>"));
+                        assert!(tool_calls.is_empty());
+                    },
+                    _ => panic!("Expected assistant message with reasoning"),
+                }
+            },
+            Err(err) => {
+                panic!("Deserialization error at {}: {}", err.path(), err);
+            }
+        }
+    }
+
+    #[test]
+    fn test_completion_response_try_from_with_reasoning() {
+        let response = CompletionResponse {
+            choices: vec![Choice {
+                index: 0,
+                message: Message::Assistant {
+                    content: "The solution is X".to_string(),
+                    reasoning_content: Some("Let me work through this step by step...".to_string()),
+                    name: None,
+                    tool_calls: vec![],
+                },
+                logprobs: None,
+                finish_reason: "stop".to_string(),
+            }],
+        };
+
+        let completion_response: completion::CompletionResponse<CompletionResponse> = 
+            response.try_into().unwrap();
+
+        // The reasoning content should not appear in the completion response choice
+        // as it's internal reasoning and not part of the final assistant content
+        match completion_response.choice.into_iter().next().unwrap() {
+            completion::AssistantContent::Text(text) => {
+                assert_eq!(text.text, "The solution is X");
+            },
+            _ => panic!("Expected text content"),
+        }
+    }
 }
