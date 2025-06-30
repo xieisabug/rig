@@ -146,20 +146,19 @@ async fn main() -> Result<(), anyhow::Error> {
                     Ok(response) => {
                         println!("  Question: {}", prompt);
                         
-                        // The response.choice contains the final assistant content
+                        // The response.choice contains the final assistant content including reasoning
                         match response.choice.into_iter().next() {
                             Some(rig::completion::AssistantContent::Text(text)) => {
-                                println!("  Agent Answer: {}", text.text);
+                                println!("  Agent Answer (includes reasoning): {}", text.text);
                             },
                             _ => println!("  No text response received"),
                         }
                         
-                        // The raw_response contains the original DeepSeek response with reasoning
+                        // The raw_response contains the original DeepSeek response with separate reasoning
                         if let Some(choice) = response.raw_response.choices.first() {
                             if let Message::Assistant { reasoning_content, .. } = &choice.message {
                                 if let Some(reasoning) = reasoning_content {
-                                    println!("  Agent's Internal Reasoning:");
-                                    println!("  {}", reasoning);
+                                    println!("  Raw Reasoning Content (also included above): {}", reasoning);
                                 } else {
                                     println!("  No reasoning content in this response");
                                 }
@@ -172,19 +171,20 @@ async fn main() -> Result<(), anyhow::Error> {
             Err(e) => println!("  Error building completion: {}", e),
         }
         
-        // Also demonstrate the simpler agent.prompt() method (but without reasoning access)
-        println!("\n  Comparison - Using agent.prompt() (simpler but no reasoning access):");
+        // Also demonstrate the simpler agent.prompt() method (includes reasoning in text)
+        println!("\n  Comparison - Using agent.prompt() (simpler, reasoning included in response):");
         match agent.prompt("What is 3 + 4?").await {
             Ok(simple_answer) => {
-                println!("  Simple Answer: {}", simple_answer);
-                println!("  Note: With .prompt(), we can't access the reasoning content");
+                println!("  Simple Answer (includes reasoning): {}", simple_answer);
+                println!("  Note: With .prompt(), reasoning content is included in the text response");
             },
             Err(e) => println!("  Error with simple prompt: {}", e),
         }
     } else {
         println!("    → Set DEEPSEEK_API_KEY environment variable to run live agent demo");
-        println!("    → The agent would use .completion() to access reasoning content");
-        println!("    → Or use .prompt() for simple text responses (without reasoning access)");
+        println!("    → The agent response now includes reasoning content in the text output");
+        println!("    → Use .completion() to access both combined text and separate reasoning fields");
+        println!("    → Use .prompt() for simple text responses (reasoning included in text)");
     }
     
     println!();

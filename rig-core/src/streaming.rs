@@ -312,10 +312,10 @@ mod tests {
         // Only messages should be forwarded, not reasoning chunks
         assert_eq!(collected_messages, vec!["The answer is", " 42"]);
         
-        // Final choice should only contain the message text
+        // Final choice should contain both reasoning and message text
         match stream.choice.into_iter().next().unwrap() {
             AssistantContent::Text(text) => {
-                assert_eq!(text.text, "The answer is 42");
+                assert_eq!(text.text, "<think>\nLet me think... step by step\n</think>\nThe answer is 42");
             },
             _ => panic!("Expected text content"),
         }
@@ -373,7 +373,7 @@ mod tests {
         // First should be text content (inserted at index 0)
         match &final_choice[0] {
             AssistantContent::Text(text) => {
-                assert_eq!(text.text, "The result is 4");
+                assert_eq!(text.text, "<think>\nI need to calculate this...\n</think>\nThe result is 4");
             },
             _ => panic!("Expected text content first"),
         }

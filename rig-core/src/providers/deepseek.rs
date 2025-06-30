@@ -833,11 +833,11 @@ mod tests {
         let completion_response: completion::CompletionResponse<CompletionResponse> = 
             response.try_into().unwrap();
 
-        // The reasoning content should not appear in the completion response choice
-        // as it's internal reasoning and not part of the final assistant content
+        // The reasoning content should appear in the completion response choice
+        // as it includes both the internal reasoning and the final assistant content
         match completion_response.choice.into_iter().next().unwrap() {
             completion::AssistantContent::Text(text) => {
-                assert_eq!(text.text, "The solution is X");
+                assert_eq!(text.text, "<think>\nLet me work through this step by step...\n</think>\nThe solution is X");
             },
             _ => panic!("Expected text content"),
         }
