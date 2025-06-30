@@ -154,6 +154,8 @@ pub enum Message {
     Assistant {
         content: String,
         #[serde(skip_serializing_if = "Option::is_none")]
+        reasoning_content: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         name: Option<String>,
         #[serde(
             default,
@@ -269,6 +271,7 @@ impl TryFrom<message::Message> for Vec<Message> {
                 if !tool_calls.is_empty() {
                     messages.push(Message::Assistant {
                         content: "".to_string(),
+                        reasoning_content: None,
                         name: None,
                         tool_calls,
                     });
@@ -280,6 +283,7 @@ impl TryFrom<message::Message> for Vec<Message> {
                     .filter_map(|content| match content {
                         message::AssistantContent::Text(text) => Some(Message::Assistant {
                             content: text.text,
+                            reasoning_content: None,
                             name: None,
                             tool_calls: vec![],
                         }),
@@ -636,6 +640,7 @@ mod tests {
             logprobs: None,
             message: Message::Assistant {
                 content: "".to_string(),
+                reasoning_content: None,
                 name: None,
                 tool_calls: vec![ToolCall {
                     id: "call_0_2b4a85ee-b04a-40ad-a16b-a405caf6e65b".to_string(),

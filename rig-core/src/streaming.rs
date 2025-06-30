@@ -26,6 +26,9 @@ pub enum RawStreamingChoice<R: Clone> {
     /// A text chunk from a message response
     Message(String),
 
+    /// A reasoning content chunk (for models like DeepSeek R1)
+    Reasoning(String),
+
     /// A tool call response chunk
     ToolCall {
         id: String,
@@ -52,6 +55,7 @@ pub type StreamingResult<R> =
 pub struct StreamingCompletionResponse<R: Clone + Unpin> {
     pub(crate) inner: StreamingResult<R>,
     text: String,
+    reasoning: String,
     tool_calls: Vec<ToolCall>,
     /// The final aggregated message from the stream
     /// contains all text and tool calls generated
@@ -66,6 +70,7 @@ impl<R: Clone + Unpin> StreamingCompletionResponse<R> {
         Self {
             inner,
             text: "".to_string(),
+            reasoning: "".to_string(),
             tool_calls: vec![],
             choice: OneOrMany::one(AssistantContent::text("")),
             response: None,
@@ -116,6 +121,12 @@ impl<R: Clone + Unpin> Stream for StreamingCompletionResponse<R> {
                     // and concat the text together
                     stream.text = format!("{}{}", stream.text, text.clone());
                     Poll::Ready(Some(Ok(AssistantContent::text(text))))
+                }
+                RawStreamingChoice::Reasoning(reasoning_text) => {
+                    // Collect reasoning content but don't forward to outer stream
+                    stream.reasoning = format!("{}{}", stream.reasoning, reasoning_text);
+                    // Continue to next item without yielding this chunk
+                    stream.poll_next_unpin(cx)
                 }
                 RawStreamingChoice::ToolCall {
                     id,
@@ -193,6 +204,9 @@ impl<R: Clone + Unpin> Stream for StreamingResultDyn<R> {
                 }
                 RawStreamingChoice::Message(m) => {
                     Poll::Ready(Some(Ok(RawStreamingChoice::Message(m))))
+                }
+                RawStreamingChoice::Reasoning(r) => {
+                    Poll::Ready(Some(Ok(RawStreamingChoice::Reasoning(r))))
                 }
                 RawStreamingChoice::ToolCall {
                     id,
