@@ -347,16 +347,30 @@ impl TryFrom<CompletionResponse> for completion::CompletionResponse<CompletionRe
         let content = match &choice.message {
             Message::Assistant {
                 content,
+                reasoning_content,
                 tool_calls,
                 ..
             } => {
-                let mut content = if content.trim().is_empty() {
+                // Combine reasoning + visible content into a single text string
+                let mut combined_text = String::new();
+
+                if let Some(reasoning) = reasoning_content {
+                    if !reasoning.trim().is_empty() {
+                        combined_text.push_str("<think>\n");
+                        combined_text.push_str(reasoning);
+                        combined_text.push_str("\n</think>\n");
+                    }
+                }
+
+                combined_text.push_str(content);
+
+                let mut parts = if combined_text.trim().is_empty() {
                     vec![]
                 } else {
-                    vec![completion::AssistantContent::text(content)]
+                    vec![completion::AssistantContent::text(&combined_text)]
                 };
 
-                content.extend(
+                parts.extend(
                     tool_calls
                         .iter()
                         .map(|call| {
@@ -368,7 +382,7 @@ impl TryFrom<CompletionResponse> for completion::CompletionResponse<CompletionRe
                         })
                         .collect::<Vec<_>>(),
                 );
-                Ok(content)
+                Ok(parts)
             }
             _ => Err(CompletionError::ResponseError(
                 "Response did not contain a valid message or tool call".into(),
@@ -571,7 +585,7 @@ mod tests {
                     "index": 0,
                     "message": {
                         "role": "assistant",
-                        "content": "Why don’t skeletons fight each other?  \nBecause they don’t have the guts! 😄"
+                        "content": "Why don't skeletons fight each other?  \nBecause they don't have the guts! 😄"
                     },
                     "logprobs": null,
                     "finish_reason": "stop"
@@ -597,7 +611,7 @@ mod tests {
             Ok(response) => match &response.choices.first().unwrap().message {
                 Message::Assistant { content, .. } => assert_eq!(
                     content,
-                    "Why don’t skeletons fight each other?  \nBecause they don’t have the guts! 😄"
+                    "Why don't skeletons fight each other?  \nBecause they don't have the guts! 😄"
                 ),
                 _ => panic!("Expected assistant message"),
             },

@@ -104,9 +104,19 @@ impl<R: Clone + Unpin> Stream for StreamingCompletionResponse<R> {
                     choice.push(AssistantContent::ToolCall(tc.clone()));
                 });
 
-                // This is required to ensure there's always at least one item in the content
-                if choice.is_empty() || !stream.text.is_empty() {
-                    choice.insert(0, AssistantContent::text(stream.text.clone()));
+                // Build the final assistant text, optionally including reasoning
+                if choice.is_empty() || !stream.text.is_empty() || !stream.reasoning.is_empty() {
+                    let mut final_text = String::new();
+
+                    if !stream.reasoning.is_empty() {
+                        final_text.push_str("<think>\n");
+                        final_text.push_str(&stream.reasoning);
+                        final_text.push_str("\n</think>\n");
+                    }
+
+                    final_text.push_str(&stream.text);
+
+                    choice.insert(0, AssistantContent::text(final_text));
                 }
 
                 stream.choice = OneOrMany::many(choice)
