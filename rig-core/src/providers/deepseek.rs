@@ -341,65 +341,96 @@ impl TryFrom<CompletionResponse> for completion::CompletionResponse<CompletionRe
     type Error = CompletionError;
 
     fn try_from(response: CompletionResponse) -> Result<Self, Self::Error> {
-        let choice = response.choices.first().ok_or_else(|| {
-            CompletionError::ResponseError("Response contained no choices".to_owned())
-        })?;
-        let content = match &choice.message {
-            Message::Assistant {
-                content,
-                reasoning_content,
-                tool_calls,
-                ..
-            } => {
+        // Use default behavior for backward compatibility
+        convert_response_with_config(response, true, "think")
+    }
+}
+
+/// Convert DeepSeek response to Rig completion response with configurable reasoning content handling
+fn convert_response_with_config(
+    response: CompletionResponse,
+    include_reason_in_content: bool,
+    include_reason_in_content_tag: &str,
+) -> Result<completion::CompletionResponse<CompletionResponse>, CompletionError> {
+    let choice = response.choices.first().ok_or_else(|| {
+        CompletionError::ResponseError("Response contained no choices".to_owned())
+    })?;
+    let content = match &choice.message {
+        Message::Assistant {
+            content,
+            reasoning_content,
+            tool_calls,
+            ..
+        } => {
+            let mut parts = vec![];
+
+            // Handle text content based on configuration
+            if include_reason_in_content {
                 // Combine reasoning + visible content into a single text string
                 let mut combined_text = String::new();
 
                 if let Some(reasoning) = reasoning_content {
                     if !reasoning.trim().is_empty() {
-                        combined_text.push_str("<think>\n");
+                        combined_text.push_str(&format!("<{}>\n", include_reason_in_content_tag));
                         combined_text.push_str(reasoning);
-                        combined_text.push_str("\n</think>\n");
+                        combined_text.push_str(&format!("\n</{}>\n", include_reason_in_content_tag));
                     }
                 }
 
                 combined_text.push_str(content);
 
-                let mut parts = if combined_text.trim().is_empty() {
-                    vec![]
-                } else {
-                    vec![completion::AssistantContent::text(&combined_text)]
-                };
+                if !combined_text.trim().is_empty() {
+                    parts.push(completion::AssistantContent::text(&combined_text));
+                }
+            } else {
+                // Keep reasoning and content separate
+                if let Some(reasoning) = reasoning_content {
+                    if !reasoning.trim().is_empty() {
+                        parts.push(completion::AssistantContent::text(&format!(
+                            "<{}>\n{}\n</{}>\n", 
+                            include_reason_in_content_tag, 
+                            reasoning, 
+                            include_reason_in_content_tag
+                        )));
+                    }
+                }
 
-                parts.extend(
-                    tool_calls
-                        .iter()
-                        .map(|call| {
-                            completion::AssistantContent::tool_call(
-                                &call.id,
-                                &call.function.name,
-                                call.function.arguments.clone(),
-                            )
-                        })
-                        .collect::<Vec<_>>(),
-                );
-                Ok(parts)
+                if !content.trim().is_empty() {
+                    parts.push(completion::AssistantContent::text(content));
+                }
             }
-            _ => Err(CompletionError::ResponseError(
-                "Response did not contain a valid message or tool call".into(),
-            )),
-        }?;
 
-        let choice = OneOrMany::many(content).map_err(|_| {
-            CompletionError::ResponseError(
-                "Response contained no message or tool call (empty)".to_owned(),
-            )
-        })?;
+            // Add tool calls
+            parts.extend(
+                tool_calls
+                    .iter()
+                    .map(|call| {
+                        completion::AssistantContent::tool_call(
+                            &call.id,
+                            &call.function.name,
+                            call.function.arguments.clone(),
+                        )
+                    })
+                    .collect::<Vec<_>>(),
+            );
 
-        Ok(completion::CompletionResponse {
-            choice,
-            raw_response: response,
-        })
-    }
+            Ok(parts)
+        }
+        _ => Err(CompletionError::ResponseError(
+            "Response did not contain a valid message or tool call".into(),
+        )),
+    }?;
+
+    let choice = OneOrMany::many(content).map_err(|_| {
+        CompletionError::ResponseError(
+            "Response contained no message or tool call (empty)".to_owned(),
+        )
+    })?;
+
+    Ok(completion::CompletionResponse {
+        choice,
+        raw_response: response,
+    })
 }
 
 /// The struct implementing the `CompletionModel` trait
@@ -477,7 +508,7 @@ impl CompletionModel for DeepSeekCompletionModel {
         completion::CompletionResponse<CompletionResponse>,
         crate::completion::CompletionError,
     > {
-        let request = self.create_completion_request(completion_request)?;
+        let request = self.create_completion_request(completion_request.clone())?;
 
         tracing::debug!("DeepSeek completion request: {request:?}");
 
@@ -493,7 +524,26 @@ impl CompletionModel for DeepSeekCompletionModel {
             tracing::debug!(target: "rig", "DeepSeek completion: {}", t);
 
             match serde_json::from_str::<ApiResponse<CompletionResponse>>(&t)? {
-                ApiResponse::Ok(response) => response.try_into(),
+                ApiResponse::Ok(response) => {
+                    // Extract reasoning configuration from additional_params
+                    let include_reason_in_content = completion_request
+                        .additional_params
+                        .as_ref()
+                        .and_then(|params| params.get("include_reason_in_content"))
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(true); // Default to true for backward compatibility
+
+                    let include_reason_in_content_tag = completion_request
+                        .additional_params
+                        .as_ref()
+                        .and_then(|params| params.get("include_reason_in_content_tag"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("think") // Default tag
+                        .to_string();
+
+                    // Convert response with the configuration
+                    convert_response_with_config(response, include_reason_in_content, &include_reason_in_content_tag)
+                },
                 ApiResponse::Err(err) => Err(CompletionError::ProviderError(err.message)),
             }
         } else {
@@ -840,6 +890,70 @@ mod tests {
                 assert_eq!(text.text, "<think>\nLet me work through this step by step...\n</think>\nThe solution is X");
             },
             _ => panic!("Expected text content"),
+        }
+    }
+
+    #[test]
+    fn test_convert_response_with_config_include_reasoning() {
+        let response = CompletionResponse {
+            choices: vec![Choice {
+                index: 0,
+                message: Message::Assistant {
+                    content: "Final answer".to_string(),
+                    reasoning_content: Some("My thinking process".to_string()),
+                    name: None,
+                    tool_calls: vec![],
+                },
+                logprobs: None,
+                finish_reason: "stop".to_string(),
+            }],
+        };
+
+        // Test with custom tag and include reasoning
+        let result = convert_response_with_config(response, true, "custom").unwrap();
+        match result.choice.into_iter().next().unwrap() {
+            completion::AssistantContent::Text(text) => {
+                assert_eq!(text.text, "<custom>\nMy thinking process\n</custom>\nFinal answer");
+            },
+            _ => panic!("Expected text content"),
+        }
+    }
+
+    #[test]
+    fn test_convert_response_with_config_separate_reasoning() {
+        let response = CompletionResponse {
+            choices: vec![Choice {
+                index: 0,
+                message: Message::Assistant {
+                    content: "Final answer".to_string(),
+                    reasoning_content: Some("My thinking process".to_string()),
+                    name: None,
+                    tool_calls: vec![],
+                },
+                logprobs: None,
+                finish_reason: "stop".to_string(),
+            }],
+        };
+
+        // Test with separate reasoning (include_reason_in_content = false)
+        let result = convert_response_with_config(response, false, "think").unwrap();
+        let parts: Vec<_> = result.choice.into_iter().collect();
+        
+        // Should have two parts: reasoning and content
+        assert_eq!(parts.len(), 2);
+        
+        match &parts[0] {
+            completion::AssistantContent::Text(text) => {
+                assert_eq!(text.text, "<think>\nMy thinking process\n</think>\n");
+            },
+            _ => panic!("Expected text content for reasoning"),
+        }
+        
+        match &parts[1] {
+            completion::AssistantContent::Text(text) => {
+                assert_eq!(text.text, "Final answer");
+            },
+            _ => panic!("Expected text content for final answer"),
         }
     }
 }

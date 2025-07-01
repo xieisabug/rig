@@ -53,6 +53,10 @@ pub struct AgentBuilder<M: CompletionModel> {
     temperature: Option<f64>,
     /// Actual tool implementations
     tools: ToolSet,
+    /// Whether to include reasoning content in the main content (for reasoning models like deepseek-reasoner)
+    include_reason_in_content: bool,
+    /// Tag to wrap reasoning content when including it in main content
+    include_reason_in_content_tag: String,
 }
 
 impl<M: CompletionModel> AgentBuilder<M> {
@@ -68,6 +72,8 @@ impl<M: CompletionModel> AgentBuilder<M> {
             dynamic_context: vec![],
             dynamic_tools: vec![],
             tools: ToolSet::default(),
+            include_reason_in_content: true,
+            include_reason_in_content_tag: "think".to_string(),
         }
     }
 
@@ -161,6 +167,20 @@ impl<M: CompletionModel> AgentBuilder<M> {
         self
     }
 
+    /// Enable/disable including reasoning content in the main content output
+    /// (useful for reasoning models like deepseek-reasoner)
+    pub fn include_reason_in_content(mut self, include: bool) -> Self {
+        self.include_reason_in_content = include;
+        self
+    }
+
+    /// Set the tag to wrap reasoning content when including it in main content
+    /// Default tag is "think" if not specified
+    pub fn include_reason_in_content_tag(mut self, tag: &str) -> Self {
+        self.include_reason_in_content_tag = tag.to_string();
+        self
+    }
+
     /// Build the agent
     pub fn build(self) -> Agent<M> {
         Agent {
@@ -174,6 +194,8 @@ impl<M: CompletionModel> AgentBuilder<M> {
             dynamic_context: self.dynamic_context,
             dynamic_tools: self.dynamic_tools,
             tools: self.tools,
+            include_reason_in_content: self.include_reason_in_content,
+            include_reason_in_content_tag: self.include_reason_in_content_tag,
         }
     }
 }

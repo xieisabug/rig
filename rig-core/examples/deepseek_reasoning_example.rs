@@ -3,7 +3,7 @@ use rig::prelude::*;
 use rig::{completion::{Completion, Prompt}, providers};
 
 #[tokio::main]
-async fn main() -> Result<(), anyhow::Error> {
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("=== DeepSeek Reasoning Content Example ===\n");
 
     // Example 1: Basic reasoning content deserialization
@@ -191,5 +191,47 @@ async fn main() -> Result<(), anyhow::Error> {
     println!("=== Example completed successfully! ===");
     println!("Note: To use the live API, set your DEEPSEEK_API_KEY environment variable");
     
+    // 初始化 DeepSeek 客户端
+    let client = providers::deepseek::Client::from_env();
+
+    // 示例 1: 默认行为 - 思考内容会包含在正式回答中
+    println!("=== 示例 1: 默认行为 ===");
+    let agent_default = client
+        .agent(DEEPSEEK_REASONER)
+        .preamble("你是一个数学老师，请解释你的思考过程。")
+        .build();
+
+    let response1 = agent_default
+        .prompt("计算 25 * 34，并解释计算过程")
+        .await?;
+    println!("默认行为响应:\n{}\n", response1);
+
+    // 示例 2: 配置不包含思考内容在正式回答中
+    println!("=== 示例 2: 分离思考内容 ===");
+    let agent_separate = client
+        .agent(DEEPSEEK_REASONER)
+        .preamble("你是一个数学老师，请解释你的思考过程。")
+        .include_reason_in_content(false)
+        .build();
+
+    let response2 = agent_separate
+        .prompt("计算 25 * 34，并解释计算过程")
+        .await?;
+    println!("分离思考内容响应:\n{}\n", response2);
+
+    // 示例 3: 自定义思考内容标签
+    println!("=== 示例 3: 自定义思考标签 ===");
+    let agent_custom_tag = client
+        .agent(DEEPSEEK_REASONER)
+        .preamble("你是一个数学老师，请解释你的思考过程。")
+        .include_reason_in_content(true)
+        .include_reason_in_content_tag("reasoning")
+        .build();
+
+    let response3 = agent_custom_tag
+        .prompt("计算 25 * 34，并解释计算过程")
+        .await?;
+    println!("自定义标签响应:\n{}\n", response3);
+
     Ok(())
 }
