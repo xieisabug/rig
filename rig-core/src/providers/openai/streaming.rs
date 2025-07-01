@@ -35,6 +35,8 @@ pub struct StreamingToolCall {
 struct StreamingDelta {
     #[serde(default)]
     content: Option<String>,
+    #[serde(default)]
+    reasoning_content: Option<String>,
     #[serde(default, deserialize_with = "json_utils::null_or_vec")]
     tool_calls: Vec<StreamingToolCall>,
 }
@@ -75,6 +77,14 @@ impl CompletionModel {
 pub async fn send_compatible_streaming_request(
     request_builder: RequestBuilder,
 ) -> Result<streaming::StreamingCompletionResponse<StreamingCompletionResponse>, CompletionError> {
+    send_compatible_streaming_request_with_config(request_builder, true, "think").await
+}
+
+pub async fn send_compatible_streaming_request_with_config(
+    request_builder: RequestBuilder,
+    include_reason_in_content: bool,
+    include_reason_in_content_tag: &str,
+) -> Result<streaming::StreamingCompletionResponse<StreamingCompletionResponse>, CompletionError> {
     let response = request_builder.send().await?;
 
     if !response.status().is_success() {
@@ -86,6 +96,7 @@ pub async fn send_compatible_streaming_request(
     }
 
     // Handle OpenAI Compatible SSE chunks
+    let include_reason_in_content_tag = include_reason_in_content_tag.to_string();
     let inner = Box::pin(stream! {
         let mut stream = response.bytes_stream();
 
@@ -96,6 +107,11 @@ pub async fn send_compatible_streaming_request(
 
         let mut partial_data = None;
         let mut calls: HashMap<usize, (String, String, String)> = HashMap::new();
+        
+        // Track reasoning content for models that support it (like DeepSeek)
+        let mut reasoning_buffer = String::new();
+        let mut content_buffer = String::new();
+        let mut has_reasoning = false;
 
         while let Some(chunk_result) = stream.next().await {
             let chunk = match chunk_result {
@@ -190,8 +206,21 @@ pub async fn send_compatible_streaming_request(
                         }
                     }
 
-                    if let Some(content) = &choice.delta.content {
-                        yield Ok(streaming::RawStreamingChoice::Message(content.clone()))
+                    // Handle reasoning content (for models like DeepSeek)
+                    if let Some(reasoning) = &delta.reasoning_content {
+                        has_reasoning = true;
+                        reasoning_buffer.push_str(reasoning);
+                    }
+
+                    // Handle regular content
+                    if let Some(content) = &delta.content {
+                        if include_reason_in_content && has_reasoning {
+                            // Buffer content to combine with reasoning later
+                            content_buffer.push_str(content);
+                        } else {
+                            // Stream content immediately (standard OpenAI behavior)
+                            yield Ok(streaming::RawStreamingChoice::Message(content.clone()));
+                        }
                     }
                 }
 
@@ -200,6 +229,41 @@ pub async fn send_compatible_streaming_request(
                     final_usage = usage.clone();
                 }
             }
+        }
+
+        // Handle buffered reasoning and content at the end of stream
+        if has_reasoning {
+            if include_reason_in_content {
+                // Combine reasoning and content
+                let mut combined = String::new();
+                if !reasoning_buffer.trim().is_empty() {
+                    combined.push_str(&format!("<{}>\n{}\n</{}>\n", 
+                        include_reason_in_content_tag, 
+                        reasoning_buffer, 
+                        include_reason_in_content_tag));
+                }
+                combined.push_str(&content_buffer);
+                
+                if !combined.trim().is_empty() {
+                    yield Ok(streaming::RawStreamingChoice::Message(combined));
+                }
+            } else {
+                // Send reasoning and content separately
+                if !reasoning_buffer.trim().is_empty() {
+                    let reasoning_text = format!("<{}>\n{}\n</{}>\n", 
+                        include_reason_in_content_tag, 
+                        reasoning_buffer, 
+                        include_reason_in_content_tag);
+                    yield Ok(streaming::RawStreamingChoice::Message(reasoning_text));
+                }
+                
+                if !content_buffer.trim().is_empty() {
+                    yield Ok(streaming::RawStreamingChoice::Message(content_buffer));
+                }
+            }
+        } else if !content_buffer.trim().is_empty() && include_reason_in_content {
+            // No reasoning, but content was buffered - send it now
+            yield Ok(streaming::RawStreamingChoice::Message(content_buffer));
         }
 
         for (_, (id, name, arguments)) in calls {
@@ -216,4 +280,54 @@ pub async fn send_compatible_streaming_request(
     });
 
     Ok(streaming::StreamingCompletionResponse::stream(inner))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_streaming_delta_with_reasoning_content() {
+        let json = r#"
+        {
+            "choices": [
+                {
+                    "delta": {
+                        "content": "The answer is",
+                        "reasoning_content": "Let me think about this problem..."
+                    }
+                }
+            ]
+        }
+        "#;
+        
+        let chunk: StreamingCompletionChunk = serde_json::from_str(json).unwrap();
+        assert_eq!(chunk.choices.len(), 1);
+        
+        let delta = &chunk.choices[0].delta;
+        assert_eq!(delta.content.as_ref().unwrap(), "The answer is");
+        assert_eq!(delta.reasoning_content.as_ref().unwrap(), "Let me think about this problem...");
+    }
+
+    #[test]
+    fn test_streaming_delta_without_reasoning_content() {
+        let json = r#"
+        {
+            "choices": [
+                {
+                    "delta": {
+                        "content": "Hello world"
+                    }
+                }
+            ]
+        }
+        "#;
+        
+        let chunk: StreamingCompletionChunk = serde_json::from_str(json).unwrap();
+        assert_eq!(chunk.choices.len(), 1);
+        
+        let delta = &chunk.choices[0].delta;
+        assert_eq!(delta.content.as_ref().unwrap(), "Hello world");
+        assert!(delta.reasoning_content.is_none());
+    }
 }

@@ -13,7 +13,6 @@ use crate::client::{CompletionClient, ProviderClient};
 use crate::json_utils::merge;
 use crate::message::Document;
 use crate::providers::openai;
-use crate::providers::openai::send_compatible_streaming_request;
 use crate::streaming::StreamingCompletionResponse;
 use crate::{
     completion::{self, CompletionError, CompletionModel, CompletionRequest},
@@ -22,6 +21,8 @@ use crate::{
 use reqwest::Client as HttpClient;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+
+
 
 // ================================================================
 // Main DeepSeek Client
@@ -556,15 +557,34 @@ impl CompletionModel for DeepSeekCompletionModel {
         &self,
         completion_request: CompletionRequest,
     ) -> Result<StreamingCompletionResponse<Self::StreamingResponse>, CompletionError> {
-        let mut request = self.create_completion_request(completion_request)?;
+        let mut request = self.create_completion_request(completion_request.clone())?;
 
         request = merge(
             request,
             json!({"stream": true, "stream_options": {"include_usage": true}}),
         );
 
+        // Extract reasoning configuration
+        let include_reason_in_content = completion_request
+            .additional_params
+            .as_ref()
+            .and_then(|params| params.get("include_reason_in_content"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+
+        let include_reason_in_content_tag = completion_request
+            .additional_params
+            .as_ref()
+            .and_then(|params| params.get("include_reason_in_content_tag"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("think");
+
         let builder = self.client.post("/v1/chat/completions").json(&request);
-        send_compatible_streaming_request(builder).await
+        openai::send_compatible_streaming_request_with_config(
+            builder, 
+            include_reason_in_content, 
+            include_reason_in_content_tag
+        ).await
     }
 }
 
@@ -955,5 +975,34 @@ mod tests {
             },
             _ => panic!("Expected text content for final answer"),
         }
+    }
+
+
+
+    #[test] 
+    fn test_deepseek_completion_request_includes_reasoning_params() {
+        let model = DeepSeekCompletionModel {
+            client: Client::new("test-key"),
+            model: DEEPSEEK_REASONER.to_string(),
+        };
+
+        let request = CompletionRequest {
+            preamble: Some("test".to_string()),
+            chat_history: OneOrMany::one(crate::message::Message::user("Hello")),
+            documents: vec![],
+            tools: vec![],
+            temperature: None,
+            max_tokens: None,
+            additional_params: Some(serde_json::json!({
+                "include_reason_in_content": false,
+                "include_reason_in_content_tag": "analysis"
+            })),
+        };
+
+        let json_request = model.create_completion_request(request).unwrap();
+        
+        // Check that the additional params are preserved in the request
+        assert_eq!(json_request["include_reason_in_content"], false);
+        assert_eq!(json_request["include_reason_in_content_tag"], "analysis");
     }
 }
